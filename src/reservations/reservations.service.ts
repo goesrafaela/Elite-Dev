@@ -27,48 +27,95 @@ export class ReservationsService {
             );
         }
 
-        const availableQuantity = event.capacity - event.soldQuantity;
+        const quantity = data.seats.length;
 
-        if (data.quantity > availableQuantity) {
+        if (quantity < 1) {
+            throw new BadRequestException(
+                'Selecione pelo menos um assento',
+            );
+        }
+
+        const availableQuantity =
+            event.capacity - event.soldQuantity;
+
+        if (quantity > availableQuantity) {
             throw new BadRequestException(
                 `Ingressos insuficientes. Disponíveis: ${availableQuantity}`,
             );
         }
 
-        const total = event.price.mul(data.quantity);
+        const total = event.price.mul(quantity);
 
-        const reservation = await this.prisma.$transaction(async (tx) => {
-            const updatedEvent = await tx.event.updateMany({
-                where: {
-                    id: event.id,
-                    status: 'PUBLISHED',
-                    soldQuantity: {
-                        lte: event.capacity - data.quantity,
+        const reservation = await this.prisma.$transaction(
+            async (tx) => {
+                const occupiedSeats = await tx.seat.findMany({
+                    where: {
+                        eventId: event.id,
+                        code: {
+                            in: data.seats,
+                        },
+                        reservationId: {
+                            not: null,
+                        },
                     },
-                },
-                data: {
-                    soldQuantity: {
-                        increment: data.quantity,
+                });
+
+                if (occupiedSeats.length > 0) {
+                    throw new BadRequestException(
+                        `Assento(s) já ocupado(s): ${occupiedSeats
+                            .map((seat) => seat.code)
+                            .join(', ')}`,
+                    );
+                }
+
+                const updatedEvent = await tx.event.updateMany({
+                    where: {
+                        id: event.id,
+                        status: 'PUBLISHED',
+                        soldQuantity: {
+                            lte: event.capacity - quantity,
+                        },
                     },
-                },
-            });
+                    data: {
+                        soldQuantity: {
+                            increment: quantity,
+                        },
+                    },
+                });
 
-            if (updatedEvent.count !== 1) {
-                throw new BadRequestException(
-                    'Ingressos insuficientes. Tente novamente.',
-                );
-            }
+                if (updatedEvent.count !== 1) {
+                    throw new BadRequestException(
+                        'Ingressos insuficientes. Tente novamente.',
+                    );
+                }
 
-            return tx.reservation.create({
-                data: {
-                    userId,
-                    eventId: event.id,
-                    quantity: data.quantity,
-                    total,
-                    status: 'PENDING',
-                },
-            });
-        });
+                const createdReservation =
+                    await tx.reservation.create({
+                        data: {
+                            userId,
+                            eventId: event.id,
+                            quantity,
+                            total,
+                            status: 'PENDING',
+                        },
+                    });
+
+                await tx.seat.updateMany({
+                    where: {
+                        eventId: event.id,
+                        code: {
+                            in: data.seats,
+                        },
+                        reservationId: null,
+                    },
+                    data: {
+                        reservationId: createdReservation.id,
+                    },
+                });
+
+                return createdReservation;
+            },
+        );
 
         return reservation;
     }
